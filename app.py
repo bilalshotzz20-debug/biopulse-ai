@@ -1,12 +1,12 @@
 import streamlit as st
 import cv2
 import numpy as np
+import mediapipe as mp
 from scipy.signal import butter, filtfilt
 from scipy.fftpack import fft
 import tempfile
 import os
 import plotly.graph_objects as go
-import requests
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="BioPulse AI", page_icon="🫀", layout="wide")
@@ -35,29 +35,8 @@ def process_video(video_path):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or fps is None: fps = 30 
 
-    # Download XML file safely (Streamlit fix)
-    xml_path = "haarcascade_frontalface_default.xml"
-    if not os.path.exists(xml_path):
-        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
-        try:
-            response = requests.get(url, timeout=10)
-            with open(xml_path, 'wb') as f:
-                f.write(response.content)
-        except Exception as e:
-            st.error(f"Failed to download AI model: {e}")
-            return None, None, None
-
-    # --- FIX FOR OPENCV VERSION ERRORS ---
-    try:
-        # Purana OpenCV tareeqa (4.8.1 ke liye)
-        face_cascade = cv2.CascadeClassifier(xml_path)
-    except AttributeError:
-        try:
-            # Naya OpenCV tareeqa (5.x ke liye)
-            face_cascade = cv2.objdetect.CascadeClassifier(xml_path)
-        except Exception as e:
-            st.error(f"Face detector initialization failed: {e}")
-            return None, None, None
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
 
     green_signal = []
 
@@ -65,16 +44,27 @@ def process_video(video_path):
         ret, frame = cap.read()
         if not ret: break
             
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
         
-        for (x, y, w, h) in faces:
-            # Forehead ROI
-            roi = frame[y + 15 : y + int(h * 0.35), x + 10 : x + w - 10]
-            if roi.size > 0:
-                mean_green = np.mean(roi[:, :, 1])
-                green_signal.append(mean_green)
-            break 
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                h, w, _ = frame.shape
+                
+                x_min = int(min([lm.x for lm in face_landmarks.landmark]) * w)
+                x_max = int(max([lm.x for lm in face_landmarks.landmark]) * w)
+                y_min = int(min([lm.y for lm in face_landmarks.landmark]) * h)
+                y_max = int(max([lm.y for lm in face_landmarks.landmark]) * h)
+                
+                # Forehead is roughly the top 30% of the face bounding box
+                y_forehead = y_min + int((y_max - y_min) * 0.3)
+                
+                roi = frame[y_min+10 : y_forehead, x_min+10 : x_max-10]
+                
+                if roi.size > 0:
+                    mean_green = np.mean(roi[:, :, 1])
+                    green_signal.append(mean_green)
+                break 
 
     cap.release()
 
