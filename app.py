@@ -1,7 +1,6 @@
 import streamlit as st
 import cv2
 import numpy as np
-import mediapipe as mp
 from scipy.signal import butter, filtfilt
 from scipy.fftpack import fft
 import tempfile
@@ -29,14 +28,11 @@ html, body, [class*="css"] { font-family: 'Outfit', sans-serif !important; }
 
 st.markdown('<div class="hero"><h1>BioPulse AI</h1><p>Contactless Heart Rate & Stress Monitor using Computer Vision</p></div>', unsafe_allow_html=True)
 
-# --- FUNCTION TO PROCESS VIDEO ---
+# --- FUNCTION TO PROCESS VIDEO (NO FACE DETECTION) ---
 def process_video(video_path):
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or fps is None: fps = 30 
-
-    mp_face_mesh = mp.solutions.face_mesh
-    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
 
     green_signal = []
 
@@ -44,27 +40,21 @@ def process_video(video_path):
         ret, frame = cap.read()
         if not ret: break
             
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb_frame)
+        h, w, _ = frame.shape
         
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                h, w, _ = frame.shape
-                
-                x_min = int(min([lm.x for lm in face_landmarks.landmark]) * w)
-                x_max = int(max([lm.x for lm in face_landmarks.landmark]) * w)
-                y_min = int(min([lm.y for lm in face_landmarks.landmark]) * h)
-                y_max = int(max([lm.y for lm in face_landmarks.landmark]) * h)
-                
-                # Forehead is roughly the top 30% of the face bounding box
-                y_forehead = y_min + int((y_max - y_min) * 0.3)
-                
-                roi = frame[y_min+10 : y_forehead, x_min+10 : x_max-10]
-                
-                if roi.size > 0:
-                    mean_green = np.mean(roi[:, :, 1])
-                    green_signal.append(mean_green)
-                break 
+        # SMART FALLBACK: Instead of detecting face, just take the center-top of the frame
+        # This assumes the user centered their face in the video as instructed.
+        x_min = int(w * 0.35)
+        x_max = int(w * 0.65)
+        y_min = int(h * 0.20)
+        y_max = int(h * 0.40)
+        
+        roi = frame[y_min:y_max, x_min:x_max]
+        
+        if roi.size > 0:
+            # Average Green channel (blood flow)
+            mean_green = np.mean(roi[:, :, 1])
+            green_signal.append(mean_green)
 
     cap.release()
 
@@ -72,6 +62,11 @@ def process_video(video_path):
         return None, None, None
 
     signal = np.array(green_signal)
+    
+    # Check if signal is just flat (e.g., black screen)
+    if np.std(signal) < 0.1:
+        return None, None, None
+
     signal = signal - np.mean(signal)
     
     fs = fps
@@ -92,6 +87,10 @@ def process_video(video_path):
     peak_freq = xf[np.argmax(np.abs(yf[0:N//2]))]
     heart_rate = peak_freq * 60
     
+    # If heart rate is 0 or way too high, it's a bad reading
+    if heart_rate < 40 or heart_rate > 200:
+        return None, None, None
+        
     hrv = np.std(np.diff(filtered_signal)) * 1000 
     stress_level = "High" if hrv < 10 else ("Moderate" if hrv < 25 else "Low")
     
@@ -102,7 +101,12 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.markdown("### 📹 Upload Video")
-    st.markdown("Please upload a **10 to 15-second** still video of your face. Ensure good lighting and minimal movement.")
+    st.markdown("""
+    **Instructions:**
+    1. Make a 10-15 second video in good lighting.
+    2. Keep your face perfectly centered in the middle of the frame.
+    3. Do not move your head. Keep it still.
+    """)
     uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "mov", "avi"])
     
     if uploaded_file is not None:
@@ -111,8 +115,6 @@ with col1:
                 tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
                 tfile.write(uploaded_file.read())
                 tfile.close()
-                
-                st.info("Video uploaded. Extracting signals...")
                 
                 try:
                     hr, stress, chart_data = process_video(tfile.name)
@@ -123,7 +125,7 @@ with col1:
                     os.unlink(tfile.name) 
                 
                 if hr is None:
-                    st.error("Could not detect a face. Ensure good lighting and keep your face still.")
+                    st.error("Could not extract signal. Ensure good lighting, face is centered, and head is still.")
                 else:
                     st.session_state['hr'] = hr
                     st.session_state['stress'] = stress
