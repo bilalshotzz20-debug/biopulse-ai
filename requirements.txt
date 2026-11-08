@@ -1,7 +1,5 @@
 streamlit
 opencv-python-headless
-mediapipe
 scipy
 numpy
 plotly
-requests
